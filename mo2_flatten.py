@@ -18,6 +18,7 @@ Always `restore` before opening MO2 again.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import json
 import os
@@ -201,7 +202,9 @@ class Plan:
     dirs: dict[str, str]                       # lower(rel) -> rel
 
 
-def build_plan(ctx: Ctx, vanilla_root: Path) -> Plan:
+def build_plan(ctx: Ctx, vanilla_root: Path, excludes: list[str] | tuple = ()) -> Plan:
+    """`excludes`: fnmatch patterns on the Data-relative path (case-insensitive); matching
+    files are left out of the flattened Data — for bisecting a bad plugin without touching MO2."""
     sources: list[tuple[str, Path]] = [(VANILLA, vanilla_root)]
     sources += [(m, ctx.mods / m) for m in enabled_mods(ctx)]
     sources.append((OVERWRITE, ctx.overwrite))
@@ -219,6 +222,10 @@ def build_plan(ctx: Ctx, vanilla_root: Path) -> Plan:
     clashes = [k for k in winners if k in dirs]
     if clashes:
         die("paths that are a file in one mod and a folder in another: " + ", ".join(clashes[:10]))
+    for pattern in excludes:
+        pat = pattern.replace("\\", "/").lower()
+        for key in [k for k in winners if fnmatch.fnmatchcase(k.replace(os.sep, "/"), pat)]:
+            del winners[key]
     return Plan(sources, winners, providers, dirs)
 
 
@@ -354,7 +361,12 @@ def cmd_flatten(ctx: Ctx, args: argparse.Namespace) -> None:
     if os.stat(ctx.mods).st_dev != os.stat(ctx.game).st_dev:
         die("mods/ and the game are on different volumes: hardlinks are impossible")
 
-    plan = build_plan(ctx, ctx.data)
+    all_files = len(build_plan(ctx, ctx.data).winners) if args.exclude else None
+    plan = build_plan(ctx, ctx.data, args.exclude)
+    if all_files is not None:
+        print(f"excluded {all_files - len(plan.winners)} files by {args.exclude}")
+        if all_files == len(plan.winners):
+            die("--exclude matched nothing — check the pattern (path relative to Data)")
     t0 = time.time()
     save_state(ctx, {"status": "building", "profile": ctx.profile.name})
     os.rename(ctx.data, ctx.vanilla)
@@ -380,8 +392,11 @@ def cmd_flatten(ctx: Ctx, args: argparse.Namespace) -> None:
         "files": len(plan.winners),
         "mods": [n for n, _ in plan.sources[1:-1]],
         "fingerprint": fingerprint(ctx),
+        "excludes": args.exclude,
         "placed": placed,
     })
+    if args.exclude:
+        print(f"excludes: {args.exclude}")
     print(f"flattened {len(plan.winners)} files from {len(plan.sources)} sources "
           f"in {time.time() - t0:.1f}s")
     for line in placed["log"]:
@@ -587,7 +602,7 @@ def cmd_verify(ctx: Ctx, args: argparse.Namespace) -> None:
     state = load_state(ctx)
     if not state or state["status"] != "flattened":
         die("not flattened")
-    plan = build_plan(ctx, ctx.vanilla)
+    plan = build_plan(ctx, ctx.vanilla, state.get("excludes", []))
     manifest = read_manifest(ctx)
     bad = []
     if set(manifest) != set(plan.winners):
@@ -687,6 +702,9 @@ def main() -> None:
     ap.add_argument("--wine-user", help="Wine user under drive_c/users (auto if only one)")
     ap.add_argument("--game-folder", default="Skyrim Special Edition",
                     help="folder name under My Games and AppData/Local")
+    ap.add_argument("--exclude", action="append", default=[], metavar="GLOB",
+                    help="leave matching Data-relative paths out of flatten/play (repeatable), "
+                         "e.g. 'NetScriptFramework/Plugins/MainMenuRandomizerSE.*'")
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in ("plan", "flatten", "restore", "status", "verify", "run", "play"):
         sp = sub.add_parser(name)
