@@ -36,7 +36,8 @@ PROFILE_INIS = ("Skyrim.ini", "SkyrimPrefs.ini", "SkyrimCustom.ini")
 LOCAL_APPDATA_FILES = ("plugins.txt", "loadorder.txt")
 JUNK_FILES = {".ds_store", "thumbs.db", "desktop.ini"}
 CROSSOVER_WINE = "/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin/wine"
-GAME_PROCESSES = r"ModOrganizer\.exe|SkyrimSE\.exe|skse64_loader\.exe|usvfs_proxy"
+GAME_EXES = ("SkyrimSE.exe", "skse64_loader.exe")
+GAME_PROCESSES = GAME_EXES + ("ModOrganizer.exe", "usvfs_proxy_x64.exe", "usvfs_proxy_x86.exe")
 
 
 # ----------------------------------------------------------------------------- paths
@@ -236,10 +237,23 @@ def save_state(ctx: Ctx, state: dict) -> None:
     os.replace(tmp, ctx.state_file)
 
 
+def windows_processes(names: tuple[str, ...]) -> list[str]:
+    """Wine processes whose image is one of `names`.
+
+    A real Windows process shows up in `ps` as `C:\\path\\name.exe args`; CrossOver's
+    wrappers (`wine --cx-app ...`, `winewrapper.exe --run -- ...`) mention the exe only
+    as an argument, so matching the FIRST token keeps them out.
+    """
+    out = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True).stdout
+    pattern = re.compile(r"^\s*\d+\s+[A-Za-z]:\\\S*?\\(" + "|".join(map(re.escape, names)) + r")(\s|$)",
+                         re.IGNORECASE)
+    return [line.strip() for line in out.splitlines() if pattern.match(line)]
+
+
 def guard_not_running() -> None:
-    r = subprocess.run(["pgrep", "-fil", GAME_PROCESSES], capture_output=True, text=True)
-    if r.stdout.strip():
-        die("close MO2 / the game first. Running:\n" + r.stdout.strip())
+    running = windows_processes(GAME_PROCESSES)
+    if running:
+        die("close MO2 / the game first. Running:\n" + "\n".join(running))
 
 
 def fingerprint(ctx: Ctx) -> dict[str, float]:
@@ -615,17 +629,26 @@ def cmd_run(ctx: Ctx, args: argparse.Namespace) -> None:
     launch(ctx)
 
 
-def launch(ctx: Ctx) -> None:
-    loader = ctx.game / "skse64_loader.exe"
-    subprocess.Popen([CROSSOVER_WINE, "--bottle", ctx.bottle, "--workdir", str(ctx.game),
-                      "--cx-app", str(loader)], start_new_session=True,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print(f"started {loader.name} in bottle {ctx.bottle!r}")
+def unix_to_win(path: Path, drive_c: Path) -> str:
+    return "C:\\" + str(path.resolve().relative_to(drive_c)).replace("/", "\\")
+
+
+def launch(ctx: Ctx) -> subprocess.Popen:
+    # CrossOver's `wine --cx-app` does not accept native paths ("could not find ... Is it
+    # installed?"), so both the exe and the workdir are passed as Windows paths.
+    drive_c = find_drive_c(ctx.game)
+    game_win = unix_to_win(ctx.game, drive_c)
+    log = open(ctx.state_dir / "wine.log", "w")
+    proc = subprocess.Popen([CROSSOVER_WINE, "--bottle", ctx.bottle, "--workdir", game_win,
+                             "--cx-app", game_win + "\\skse64_loader.exe"],
+                            start_new_session=True, stdout=log, stderr=subprocess.STDOUT)
+    print(f"started {game_win}\\skse64_loader.exe in bottle {ctx.bottle!r} "
+          f"(wine output: {ctx.state_dir / 'wine.log'})")
+    return proc
 
 
 def game_running() -> bool:
-    r = subprocess.run(["pgrep", "-fi", r"SkyrimSE\.exe|skse64_loader\.exe"], capture_output=True)
-    return r.returncode == 0
+    return bool(windows_processes(GAME_EXES))
 
 
 def cmd_play(ctx: Ctx, args: argparse.Namespace) -> None:
@@ -633,9 +656,14 @@ def cmd_play(ctx: Ctx, args: argparse.Namespace) -> None:
     if load_state(ctx):
         cmd_restore(ctx, args)                        # stale flatten from an earlier session
     cmd_flatten(ctx, args)
-    launch(ctx)
+    proc = launch(ctx)
     deadline = time.time() + 180
     while not game_running():
+        rc = proc.poll()
+        if rc not in (None, 0):
+            print(f"wine failed (exit {rc}):\n" + (ctx.state_dir / "wine.log").read_text()[-2000:],
+                  file=sys.stderr)
+            break
         if time.time() > deadline:
             print("the game did not start within 3 minutes; restoring", file=sys.stderr)
             break
