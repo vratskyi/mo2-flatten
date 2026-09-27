@@ -44,7 +44,7 @@ CrossOver 26.3, бутылка Windows 11 (64-bit). **Перед началом 
    (`dotNetFx40_Full_x86_x64.exe`, SHA-256 `65e06425…c38659f` — то же, что в winetricks):
    ```bash
    7z x dotNetFx40_Full_x86_x64.exe -ox
-   cabextract -F '_003_mscoree_dll_*' -F '_017_mscorees_dll_*' -d out x/netfx_Core.mzz
+   cabextract -F '_0??_mscoree*' -d out x/netfx_Core.mzz   # -F берёт только ОДНУ маску
    # amd64 -> windows/system32, x86 -> windows/syswow64
    cp out/_003_mscoree_dll_amd64  drive_c/windows/system32/mscoree.dll
    cp out/_017_mscorees_dll_amd64 drive_c/windows/system32/mscorees.dll
