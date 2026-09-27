@@ -27,7 +27,9 @@ No Grass In Objects и крашлоги NSF.
 
 ## Исправление: настоящий .NET Framework 4.8 вместо Wine Mono (проверено 2026-09-26)
 
-С ним RfaD запускается полностью, со всеми 4 плагинами NSF: меню, новая игра, пролог.
+С ним RfaD запускается полностью, со всеми 4 плагинами NSF: меню, новая игра, пролог,
+деревья навыков RfaD (Custom Skills — выбран Паладин). Играется плавно. Запуск через
+`rfad-play.command` (flatten), не через MO2.
 CrossOver 26.3, бутылка Windows 11 (64-bit). **Перед началом сделайте копию бутылки.**
 
 1. **Удалить Wine Mono.** CrossOver → Run Command → `uninstaller` → «Wine Mono Windows Support» → Remove.
