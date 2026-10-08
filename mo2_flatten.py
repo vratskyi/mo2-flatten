@@ -24,6 +24,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -310,7 +311,12 @@ def ini_set(path: Path, section: str, key: str, value: str) -> None:
             lines.insert(sect_end, f"{key}={value}")
         else:
             lines += ["", f"[{section}]", f"{key}={value}"]
-    path.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
+    mode = os.stat(path).st_mode
+    os.chmod(path, mode | stat.S_IWUSR)   # profile ini may be read-only on purpose; keep that after writing
+    try:
+        path.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
+    finally:
+        os.chmod(path, mode)
 
 
 def profile_settings(ctx: Ctx) -> tuple[bool, bool]:
