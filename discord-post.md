@@ -1,76 +1,46 @@
-**RfaD на macOS (CrossOver) — починил зависание на главном меню / «Загрузка анимаций 0/612»**
+<!-- Лимит Discord — 2000 символов на сообщение. Каждая часть ниже — отдельное сообщение. -->
 
-**Симптомы:** игра стартует, SKSE грузит плагины, но дальше фон главного меню без кнопок,
-или висит плашка «Loading animations 0/612», или «Новая игра» не грузится. Иногда вылет
-в `refrain_nextgen.dll`.
+<!-- ЧАСТЬ 1 -->
+**RfaD на Mac: запустил и делюсь всем, на что наткнулся по пути** 🍎⚔️
 
-**Причина:** .NET Script Framework (на нём Custom Skills — деревья навыков, SSE Gameplay Tweaks,
-No Grass In Objects) не работает на **Wine Mono**, встроенной замене .NET в CrossOver. Главный
-поток игры навсегда встаёт внутри Mono. Лечится настоящим **.NET Framework 4.8** от Microsoft.
-После этого RfaD работает полностью, через обычный MO2, деревья навыков на месте.
+Хотел поиграть в RfaD на MacBook (M1 Pro, CrossOver 26.3). Сборка большая, ~400 модов на MO2 — и по пути собрал, кажется, все грабли. Итог: **RfaD работает полностью**, с деревьями навыков и всеми модами, играется плавно. Всё, что ниже, — с причинами и проверено, не «попробуйте переустановить».
 
-Проверено: MacBook M1 Pro, CrossOver 26.3, RfaD SE 6.2, Skyrim 1.5.97, MO2 2.5.2.
+**1. Меню без кнопок / «Загрузка анимаций 0/612» / «Новая игра» висит**
+Виноват не мод, а .NET Script Framework (на нём деревья навыков RfaD) под **Wine Mono** — встроенной заменой .NET в CrossOver. Игра навсегда встаёт внутри Mono. Лечится установкой настоящего **.NET Framework 4.8** от Microsoft в бутылку. Пошаговые команды — в README по ссылке внизу.
 
-**⚠️ Сначала сделайте копию бутылки** (CrossOver → бутылка → Duplicate). Шаги меняют её необратимо.
+**2. Вылеты в `refrain_nextgen.dll`, зависания при старте**
+usvfs (виртуальная файловая система MO2) под Wine на таком размере сборки нестабилен. Я написал скрипт **mo2-flatten**: он собирает профиль MO2 в настоящую папку `Data` из hardlink'ов (место на диске не занимает), запускает игру через SKSE напрямую и после выхода возвращает всё как было. Моды настраиваешь в MO2 как обычно.
 
-**0. usvfs.** Замените в папке MO2 файлы `usvfs_proxy_x64.exe`, `usvfs_proxy_x86.exe`,
-`usvfs_x64.dll`, `usvfs_x86.dll` на версию 0.5.7.2:
-https://github.com/ModOrganizer2/usvfs/releases/tag/v0.5.7.2
-(На usvfs из комплекта MO2 2.5.2 SKSE-плагины грузились с ошибками.)
+**3. После выхода из подземелья все новые сейвы вылетают при загрузке**
+Думал, виноваты ботинки, которые там нашёл 🙂 Оказалось, в Skyrim SE сейв не может быть больше **64 МБ** в распакованном виде. Длинное прохождение до него дорастает, и игра молча пишет обрезанный файл. Лечится одной строкой в Engine Fixes (`EngineFixes.toml`):
+```
+SaveGameMaxSize = true
+```
+Это поднимает лимит до 128 МБ. Обрезанные сейвы уже не спасти, но последний целый грузится. **Касается и Windows** — включите заранее, если играете долго.
 
-**1. Удалите Wine Mono:** CrossOver → бутылка → Run Command → `uninstaller` →
-«Wine Mono Windows Support» → Remove.
+<!-- ЧАСТЬ 2 -->
+**Что даёт запуск через скрипт вместо MO2 — замерил**
 
-**2–7.** Команды для Терминала macOS. Поменяйте `BOTTLE` на имя своей бутылки.
-Нужны установщики Microsoft: [.NET 4.8 офлайн](https://dotnet.microsoft.com/download/dotnet-framework/net48)
-(`ndp48-x86-x64-allos-enu.exe`) и [.NET 4.0](https://download.microsoft.com/download/9/5/A/95A9616B-7A37-4AF6-BC36-D6EA96C8DAAE/dotNetFx40_Full_x86_x64.exe)
-(`dotNetFx40_Full_x86_x64.exe`) — положите оба в «Загрузки». Ещё нужен 7z: `brew install p7zip`.
+Один и тот же сейв, по 3 запуска каждым способом вперемешку, время снято автоматически по логам:
 
-```bash
-BOTTLE="Games"
-WINE="/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin/wine"
-CAB="/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin/cabextract"
-WIN="$HOME/Library/Application Support/CrossOver/Bottles/$BOTTLE/drive_c/windows"
-w() { "$WINE" --bottle "$BOTTLE" --cx-app "$@"; }
-
-# 2. Временно Windows 7: на Win10/11 установщик .NET 4.8 блокируется ("already installed")
-w winecfg -v win7
-
-# 3. Ставим .NET 4.8. Предупреждения про Windows Update — Continue, дождаться "Installation Is Complete"
-#    (CrossOver запускает exe только по Windows-пути, поэтому сначала копируем в C:\)
-cp "$HOME/Downloads/ndp48-x86-x64-allos-enu.exe" "$WIN/../ndp48.exe"
-w 'C:\ndp48.exe'
-
-# 4. Настоящий mscoree.dll из пакета .NET 4.0 (установщик 4.8 его не кладёт,
-#    а заглушка Wine умеет запускать только Mono)
-cd /tmp && rm -rf net40 && mkdir net40 && cd net40
-7z x -y "$HOME/Downloads/dotNetFx40_Full_x86_x64.exe" -ox > /dev/null
-"$CAB" -q -F '_0??_mscoree*' -d out x/netfx_Core.mzz
-cp out/_003_mscoree_dll_amd64  "$WIN/system32/mscoree.dll"
-cp out/_017_mscorees_dll_amd64 "$WIN/system32/mscorees.dll"
-cp out/_003_mscoree_dll_x86    "$WIN/syswow64/mscoree.dll"
-cp out/_017_mscorees_dll_x86   "$WIN/syswow64/mscorees.dll"
-
-# 5. Реестр
-w reg add 'HKCU\Software\Wine\DllOverrides' /v mscoree /t REG_SZ /d native /f
-w reg add 'HKLM\Software\Microsoft\.NETFramework' /v InstallRoot /t REG_SZ /d 'C:\windows\Microsoft.NET\Framework64\' /f
-w reg add 'HKLM\Software\Wow6432Node\Microsoft\.NETFramework' /v InstallRoot /t REG_SZ /d 'C:\windows\Microsoft.NET\Framework\' /f
-w reg add 'HKLM\Software\Microsoft\.NETFramework\Policy\v4.0' /v 30319 /t REG_SZ /d 30319-30319 /f
-w reg add 'HKLM\Software\Wow6432Node\Microsoft\.NETFramework\Policy\v4.0' /v 30319 /t REG_SZ /d 30319-30319 /f
-w reg add 'HKLM\Software\Microsoft\.NETFramework' /v OnlyUseLatestCLR /t REG_DWORD /d 1 /f
-w reg add 'HKLM\Software\Wow6432Node\Microsoft\.NETFramework' /v OnlyUseLatestCLR /t REG_DWORD /d 1 /f
-
-# 6. Возвращаем Windows 11 (или какая была у бутылки)
-w winecfg -v win11
-
-# 7. Проверка: должно напечатать "Microsoft .NET Framework ... version 4.8.x"
-w 'C:\windows\Microsoft.NET\Framework64\v4.0.30319\RegAsm.exe' '/?'
+```
+                          MO2 + usvfs   скрипт
+до главного меню          106 с         61 с
+загрузка сейва            32 с          32 с
 ```
 
-Если на шаге 7 выскочило окно «A fatal error occurred… mscorees.dll could not be loaded»,
-значит, пропущен шаг 4 или 5.
+• Сама игра стартует **на 45 с быстрее**. Но скрипт ещё ~35 с собирает `Data` перед запуском, так что от двойного клика до меню выигрыш честно **около 10 с**.
+• Загрузка сейвов **не ускоряется** — там время уходит на сам сейв, а не на чтение файлов.
+• **Мышь отзывчивее**: под MO2 чувствую инпутлаг, через скрипт его нет. Это ощущение, а не замер — на Mac нечем записать время кадра. Но объяснение есть: usvfs перехватывает каждое чтение файла, а Skyrim подгружает текстуры прямо во время игры.
 
-После этого запускайте RfaD как обычно, через MO2 → SKSE.
+Мерил на: MacBook Pro 16" M1 Pro, 32 ГБ, macOS 15.7, CrossOver 26.3 (DXVK), 3440×1440, VSync, 60 FPS, ReShade.
 
-*Не проверял: на свежей бутылке шаги 1–6, вероятно, заменяет `winetricks dotnet48`
-(он делает то же самое), но через CrossOver я его не гонял.*
+**Кому полезно**
+• Играете на Mac (или Linux/Wine) в большую сборку на MO2 — скрипт и рецепт с .NET 4.8.
+• Сейвы начали вылетать при загрузке после долгой игры — пункт 3, на любой платформе.
+• В крашлоге видите `SkyrimSE.exe+128731A` / `LoadStorageWrapper` — это почти наверняка тот же лимит 64 МБ.
+
+Скрипт, полный разбор всех проблем, команды для .NET 4.8 и данные замеров:
+👉 https://github.com/vratskyi/mo2-flatten
+
+Перед установкой .NET сделайте копию бутылки (CrossOver → Duplicate). Вопросы — пишите, помогу 🙂

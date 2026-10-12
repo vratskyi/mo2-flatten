@@ -1,89 +1,204 @@
 # mo2-flatten
 
-Запуск большой MO2-сборки (Skyrim SE, RfaD) под CrossOver/Wine **без usvfs**. Профиль MO2
-материализуется в настоящую папку `Data` hardlink'ами: места не занимает, 74 тыс. файлов
-собираются примерно за 25 секунд. Игра стартует через `skse64_loader.exe` напрямую.
+> **English.** Run a large Mod Organizer 2 setup (Skyrim SE 1.5.97, *Requiem for a Dream*, ~400 mods)
+> on macOS through CrossOver/Wine **without usvfs**. The MO2 profile is materialised into a real `Data`
+> folder with hardlinks (no extra disk space, ~35 s for 73k files), the game is started through
+> `skse64_loader.exe`, and everything is put back after the game exits. Measured on an M1 Pro: the game
+> reaches the main menu in **61 s instead of 106 s** under MO2/usvfs. The README also documents every
+> crash we hit on the way and its fix (.NET Script Framework under Wine Mono, the 64 MB save size
+> limit, …). The rest of this page is in Russian.
 
-Зачем это нужно: usvfs под Wine нестабилен на больших сборках. Он отдаёт плагинам битые данные
-(краш `refrain_nextgen.dll` при чтении своего ini) или виснет на файловой операции (OAR
-«Loading animations 0/612»).
+Запуск большой MO2-сборки (Skyrim SE, RfaD) на Mac под CrossOver **без usvfs**. Профиль MO2
+превращается в настоящую папку `Data` из hardlink'ов: место на диске не занимает, моды и MO2 не
+меняются. Игра стартует через SKSE напрямую, после выхода всё возвращается как было.
 
-## Что на самом деле вешало RfaD (разбор 2026-09-26)
+Кому пригодится: тем, кто играет на Mac (или Linux/Wine) в сборки на MO2 и упирается в зависания,
+вылеты или медленный старт. Ниже ещё и разбор всех проблем, которые встретились по пути, с причинами
+и исправлениями. Большая часть из них не зависит от скрипта.
 
-**Зависание вызывал не usvfs, а .NET Script Framework (NSF) под Wine Mono.** Проверено серией
-запусков: flatten без usvfs, MSync вкл/выкл, исключение плагинов по одному через `excludes.txt`:
+## Результаты замеров
 
-| Что загружено | Результат |
+Один и тот же сейв, 6 запусков с чередованием режимов (MO2 → скрипт → MO2 → …), чтобы дисковый кэш
+не играл в пользу одного из них. Время снималось автоматически по логам SKSE-плагинов
+(`bench_load.py`, данные — в `bench_results.csv`).
+
+| | MO2 + usvfs | mo2-flatten |
+|---|---|---|
+| Старт `SkyrimSE.exe` → главное меню (медиана, мин–макс) | 106,1 с (105,3–112,9) | **61,1 с** (60,6–62,3) |
+| Загрузка сейва | 32,6 с (32,2–33,6) | 32,3 с (32,3–33,2) |
+| Подготовка `Data` перед запуском | — | 34–36 с |
+| Возврат `Data` после выхода | — | 18–19 с |
+
+Что из этого следует, без приукрашивания:
+
+- **Сама игра стартует на 45 с (43 %) быстрее.** Разница намного больше разброса между запусками.
+  На старте движок читает 400+ плагинов и архивов, и под MO2 каждое обращение к файлу проходит
+  через перехват usvfs.
+- **От двойного клика до меню выигрыш меньше, около 10 с** (≈ 96 с против ≈ 106 с), потому что
+  скрипт сначала собирает `Data`. Время запуска самого MO2 в замер не входило.
+- **Загрузка сейва не ускоряется.** Разница в пределах шума: там время уходит на разбор самого
+  сейва и скриптов, а не на чтение файлов.
+- **Отклик мыши — наблюдение, не замер.** Под MO2 чувствуется инпутлаг, через скрипт его нет.
+  Объяснение то же: usvfs перехватывает чтение файлов, а Skyrim подгружает текстуры и меши прямо
+  во время игры. Отдельные кадры задерживаются, и мышь, привязанная к кадрам, ощущается вязкой.
+  Цифр нет: на macOS нет инструмента, который пишет время кадра в файл.
+
+Где мерили:
+
+| | |
 |---|---|
-| NSF + любой из его плагинов (4 запуска, разные наборы) | главное меню не появляется; главный поток стоит в `libmono` |
-| NSF без плагинов (2 запуска) | меню есть, «Новая игра» висит |
-| без NSF (`DLLPlugins/NetScriptFramework.Runtime.dll` исключён) | меню, загрузка анимаций OAR, создание персонажа — работают |
+| Машина | MacBook Pro 16" (2021), Apple M1 Pro (8P+2E CPU, 16 GPU), 32 ГБ |
+| ОС | macOS 15.7.7 |
+| CrossOver | 26.3, бутылка Windows 11 (64-bit), графика DXVK |
+| Экран | внешний 3440×1440 @ 165 Гц |
+| Игра | Skyrim SE 1.5.97, RfaD SE 6.2, MO2 2.5.2, usvfs 0.5.7.2 |
+| Графика в игре | 3440×1440, окно без рамки (SSE Display Tweaks), VSync, лимит 60 FPS, ReShade |
 
-Стек брался через `winedbg --command "bt all"` на зависшем процессе. На живом процессе так
-делать нельзя: отладчик не отцепляется и замораживает игру.
+## Быстрый старт
 
-Без NSF не работают Custom Skills Framework (деревья навыков RfaD), SSE Gameplay Tweaks,
-No Grass In Objects и крашлоги NSF.
-
-## Исправление: настоящий .NET Framework 4.8 вместо Wine Mono (проверено 2026-09-26)
-
-С ним RfaD запускается полностью, со всеми 4 плагинами NSF: меню, новая игра, пролог,
-деревья навыков RfaD (Custom Skills — выбран Паладин). Играется плавно. Запуск через
-`rfad-play.command` (flatten), не через MO2.
-CrossOver 26.3, бутылка Windows 11 (64-bit). **Перед началом сделайте копию бутылки.**
-
-1. **Удалить Wine Mono.** CrossOver → Run Command → `uninstaller` → «Wine Mono Windows Support» → Remove.
-   Wine Mono пишет в реестр `NDP\v4\Full Release=533320` (4.8.1), и установщик .NET отказывается
-   ставиться («already installed»).
-2. **Временно переключить бутылку на Windows 7:** `wine --bottle <имя> winecfg -v win7`.
-   На Windows 10/11 .NET 4.8 считается частью системы, и установщик блокируется.
-3. **Поставить .NET 4.8** (`ndp48-x86-x64-allos-enu.exe`, офлайн-установщик Microsoft).
-   Предупреждения про Windows Update — Continue.
-4. **Поставить настоящий `mscoree.dll`.** Установщик 4.8 его не кладёт, а встроенная заглушка
-   Wine умеет запускать только Mono. Берётся из установщика .NET 4.0
-   (`dotNetFx40_Full_x86_x64.exe`, SHA-256 `65e06425…c38659f` — то же, что в winetricks):
-   ```bash
-   7z x dotNetFx40_Full_x86_x64.exe -ox
-   cabextract -F '_0??_mscoree*' -d out x/netfx_Core.mzz   # -F берёт только ОДНУ маску
-   # amd64 -> windows/system32, x86 -> windows/syswow64
-   cp out/_003_mscoree_dll_amd64  drive_c/windows/system32/mscoree.dll
-   cp out/_017_mscorees_dll_amd64 drive_c/windows/system32/mscorees.dll
-   cp out/_003_mscoree_dll_x86    drive_c/windows/syswow64/mscoree.dll
-   cp out/_017_mscorees_dll_x86   drive_c/windows/syswow64/mscorees.dll
-   ```
-5. **Реестр** (через `wine --bottle <имя> reg add …`):
-   ```
-   HKCU\Software\Wine\DllOverrides                          mscoree = native
-   HKLM\Software\Microsoft\.NETFramework                    InstallRoot = C:\windows\Microsoft.NET\Framework64\
-   HKLM\Software\Wow6432Node\Microsoft\.NETFramework        InstallRoot = C:\windows\Microsoft.NET\Framework\
-   HKLM\Software\Microsoft\.NETFramework\Policy\v4.0        30319 = 30319-30319
-   HKLM\Software\Wow6432Node\Microsoft\.NETFramework\Policy\v4.0   30319 = 30319-30319
-   HKLM\Software\Microsoft\.NETFramework                    OnlyUseLatestCLR = dword:1
-   HKLM\Software\Wow6432Node\Microsoft\.NETFramework        OnlyUseLatestCLR = dword:1
-   ```
-   Без `mscorees.dll` и `InstallRoot`/`Policy` окно ошибки говорит: «A fatal error occurred…
-   mscorees.dll could not be loaded».
-6. **Вернуть Windows 11:** `winecfg -v win11`.
-7. **Проверка:** `wine --bottle <имя> 'C:\windows\Microsoft.NET\Framework64\v4.0.30319\RegAsm.exe' '/?'`
-   должен напечатать «Microsoft .NET Framework … version 4.8.x». Окно с ошибкой — значит, шаг пропущен.
-
-Шаги 4–5 — ручное повторение того, что делает `winetricks dotnet40` (он ставится перед dotnet48).
-На свежей копии бутылки, скорее всего, хватит `winetricks dotnet48`, но это не проверялось.
-
-Не проверено: нужен ли после этого flatten, или RfaD пойдёт и через обычный MO2 с usvfs 0.5.7.2.
-
-## Как играть
+Нужны Python 3 (проверено на 3.14 из Homebrew, без сторонних пакетов) и MO2-сборка внутри
+бутылки CrossOver. В `rfad-play.command` укажите путь к своей папке MO2 (по умолчанию бутылка `Games`,
+`C:\Games\RfaD\MO2`).
 
 ```bash
+git clone https://github.com/vratskyi/mo2-flatten.git
+cd mo2-flatten
 ./rfad-play.command          # или двойной клик по файлу в Finder
 ```
 
-`play` делает всё сам: сплющивает `Data`, запускает SKSE, ждёт выхода из игры и возвращает
-всё как было. MO2 никогда не видит сплющенную `Data`. Каждый запуск собирается по актуальному
-modlist, так что пересобирать после изменений в MO2 руками не нужно.
+`./` обязателен: zsh не ищет команды в текущей папке (`zsh: command not found: rfad-play.command`).
+MO2 перед запуском закройте, иначе скрипт откажется работать.
 
-Окно терминала на время игры держите открытым. Если закрыть его раньше, `Data` останется
-сплющенной — до открытия MO2 выполните `restore`.
+`play` делает всё сам: собирает `Data`, запускает SKSE, ждёт выхода из игры и возвращает всё как было.
+MO2 сплющенную `Data` никогда не видит. Каждый запуск собирается по актуальному modlist, так что
+моды можно настраивать в MO2 как обычно. Окно терминала держите открытым до выхода из игры. Если
+закрыть его раньше, `Data` останется сплющенной, и до открытия MO2 нужно выполнить `restore`.
+
+## Проблемы и решения (RfaD на macOS)
+
+### 1. Главное меню без кнопок, «Загрузка анимаций 0/612», «Новая игра» висит
+
+**Причина:** .NET Script Framework (NSF) не работает на **Wine Mono**, встроенной замене .NET в
+CrossOver. Главный поток игры навсегда встаёт внутри Mono. На NSF держатся Custom Skills Framework
+(деревья навыков RfaD), SSE Gameplay Tweaks, No Grass In Objects и крашлоги NSF.
+
+Как установили: серия запусков, плагины исключались по одному через `excludes.txt`, стек снимался
+`winedbg --command "bt all"` с зависшего процесса (с живого так нельзя: отладчик замораживает игру).
+
+| Что загружено | Результат |
+|---|---|
+| NSF + любой из его плагинов (4 запуска) | меню не появляется, главный поток стоит в `libmono` |
+| NSF без плагинов (2 запуска) | меню есть, «Новая игра» висит |
+| без NSF | меню, анимации OAR, создание персонажа работают |
+
+**Исправление:** поставить в бутылку настоящий .NET Framework 4.8 от Microsoft. После этого RfaD
+работает целиком, со всеми плагинами NSF, и через скрипт, и через MO2.
+
+**⚠️ Сначала сделайте копию бутылки** (CrossOver → бутылка → Duplicate): шаги меняют её необратимо.
+
+1. **Удалить Wine Mono.** CrossOver → бутылка → Run Command → `uninstaller` → «Wine Mono Windows
+   Support» → Remove. Wine Mono прописывает в реестре версию 4.8.1, и установщик .NET отказывается
+   ставиться («already installed»).
+2. Остальное — команды для Терминала. Поменяйте `BOTTLE` на имя своей бутылки. Нужны установщики
+   Microsoft: [.NET 4.8 офлайн](https://dotnet.microsoft.com/download/dotnet-framework/net48)
+   (`ndp48-x86-x64-allos-enu.exe`) и
+   [.NET 4.0](https://download.microsoft.com/download/9/5/A/95A9616B-7A37-4AF6-BC36-D6EA96C8DAAE/dotNetFx40_Full_x86_x64.exe)
+   (`dotNetFx40_Full_x86_x64.exe`, SHA-256 `65e06425…c38659f`, тот же, что берёт winetricks).
+   Оба положите в «Загрузки». Ещё нужен 7z: `brew install p7zip`.
+
+```bash
+BOTTLE="Games"
+WINE="/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin/wine"
+CAB="/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin/cabextract"
+WIN="$HOME/Library/Application Support/CrossOver/Bottles/$BOTTLE/drive_c/windows"
+w() { "$WINE" --bottle "$BOTTLE" --cx-app "$@"; }
+
+# Временно Windows 7: на Win10/11 установщик .NET 4.8 блокируется
+w winecfg -v win7
+
+# .NET 4.8. Предупреждения про Windows Update — Continue, дождаться "Installation Is Complete".
+# CrossOver запускает exe только по Windows-пути, поэтому сначала копируем в C:\
+cp "$HOME/Downloads/ndp48-x86-x64-allos-enu.exe" "$WIN/../ndp48.exe"
+w 'C:\ndp48.exe'
+
+# Настоящий mscoree.dll из пакета .NET 4.0: установщик 4.8 его не кладёт,
+# а заглушка Wine умеет запускать только Mono. cabextract учитывает только одну маску -F.
+cd /tmp && rm -rf net40 && mkdir net40 && cd net40
+7z x -y "$HOME/Downloads/dotNetFx40_Full_x86_x64.exe" -ox > /dev/null
+"$CAB" -q -F '_0??_mscoree*' -d out x/netfx_Core.mzz
+cp out/_003_mscoree_dll_amd64  "$WIN/system32/mscoree.dll"
+cp out/_017_mscorees_dll_amd64 "$WIN/system32/mscorees.dll"
+cp out/_003_mscoree_dll_x86    "$WIN/syswow64/mscoree.dll"
+cp out/_017_mscorees_dll_x86   "$WIN/syswow64/mscorees.dll"
+
+# Реестр
+w reg add 'HKCU\Software\Wine\DllOverrides' /v mscoree /t REG_SZ /d native /f
+w reg add 'HKLM\Software\Microsoft\.NETFramework' /v InstallRoot /t REG_SZ /d 'C:\windows\Microsoft.NET\Framework64\' /f
+w reg add 'HKLM\Software\Wow6432Node\Microsoft\.NETFramework' /v InstallRoot /t REG_SZ /d 'C:\windows\Microsoft.NET\Framework\' /f
+w reg add 'HKLM\Software\Microsoft\.NETFramework\Policy\v4.0' /v 30319 /t REG_SZ /d 30319-30319 /f
+w reg add 'HKLM\Software\Wow6432Node\Microsoft\.NETFramework\Policy\v4.0' /v 30319 /t REG_SZ /d 30319-30319 /f
+w reg add 'HKLM\Software\Microsoft\.NETFramework' /v OnlyUseLatestCLR /t REG_DWORD /d 1 /f
+w reg add 'HKLM\Software\Wow6432Node\Microsoft\.NETFramework' /v OnlyUseLatestCLR /t REG_DWORD /d 1 /f
+
+# Вернуть Windows 11 (или какая была у бутылки)
+w winecfg -v win11
+
+# Проверка: должно напечатать "Microsoft .NET Framework ... version 4.8.x"
+w 'C:\windows\Microsoft.NET\Framework64\v4.0.30319\RegAsm.exe' '/?'
+```
+
+Окно «A fatal error occurred… mscorees.dll could not be loaded» на проверке значит, что пропущен
+шаг с `mscoree.dll` или с реестром. На свежей бутылке всё это, вероятно, заменяет
+`winetricks dotnet48`, но через CrossOver это не проверялось.
+
+Если .NET 4.8 ставить не хочется, RfaD запустится без NSF: раскомментируйте строку в `excludes.txt`.
+Тогда не будет деревьев навыков и трёх модов.
+
+### 2. Вылет в `refrain_nextgen.dll` при старте, OAR висит на «Loading animations»
+
+**Причина:** usvfs под Wine на сборке такого размера ведёт себя нестабильно: отдаёт плагинам битые
+данные (краш `refrain_nextgen.dll` при чтении своего ini) или виснет на файловой операции.
+
+**Исправление:** играть через mo2-flatten, там usvfs нет вообще. Если нужен именно MO2, замените
+в его папке `usvfs_proxy_x64.exe`, `usvfs_proxy_x86.exe`, `usvfs_x64.dll`, `usvfs_x86.dll` на
+[версию 0.5.7.2](https://github.com/ModOrganizer2/usvfs/releases/tag/v0.5.7.2): с usvfs из комплекта
+MO2 2.5.2 SKSE-плагины грузились с ошибками.
+
+### 3. После долгой игры любой новый сейв вылетает при загрузке
+
+**Симптомы:** старые сейвы грузятся, все сейвы начиная с какого-то момента вылетают на загрузке.
+В крашлоге NSF (`Data/NetScriptFramework/Crash/`, после `restore` — `MO2/overwrite/...`) одно и то же
+место: `SkyrimSE.exe+128731A`, `LoadStorageWrapper` → `BSScript::...VirtualMachine`. Совпадает с
+каким-то событием в игре (у нас — выход из подземелья с новыми ботинками), но событие ни при чём.
+
+**Причина:** в Skyrim SE 1.5.97 распакованный сейв не может быть больше **64 МиБ**. Сейв растёт
+вместе с прохождением; дойдя до потолка, игра молча записывает обрезанный файл. Разбор наших
+сейвов: 423–446 росли с 61,1 до 63,7 МиБ и целые, все последующие ровно 64,000 МиБ, у них обрезан
+хвост, а в таблице смещений стоит 67108864 (ровно 64 МиБ) вместо настоящего адреса.
+
+**Исправление:** в Engine Fixes этот лимит поднимается до 128 МиБ, но опция выключена по умолчанию.
+`SKSE/Plugins/EngineFixes.toml` в моде SSE Engine Fixes:
+
+```toml
+[Experimental]
+SaveGameMaxSize = true
+```
+
+Проверено: первый сейв после правки записался целым, 64,03 МиБ. Уже обрезанные сейвы не
+восстановить: данные потеряны при записи. Нужно вернуться на последний целый (меньше 64 МиБ).
+
+### 4. Редкий вылет в `BSWin32KeyboardDevice::Process`
+
+Игра упала при нажатии клавиши: Wine отдал DirectInput-событие с мусорным скан-кодом (`0x6D266573`
+вместо 0–255), движок использовал его как индекс в таблице клавиш. Один случай на 12 крашлогов,
+не воспроизводится. Не связан ни со сборкой, ни с сейвом, ни с тем, что в этот момент делалось в
+игре. Если повторяется — проверьте, не совпадает ли с переключением раскладки или Cmd+Tab.
+
+### 5. `PermissionError: ... Skyrim.ini` при запуске скрипта
+
+Было в старых версиях скрипта: если ini в профиле MO2 сделаны «только для чтения», твики из
+`initweaks.ini` не могли записаться. Исправлено: скрипт временно даёт запись и возвращает режим
+обратно, так что защита ini от перезаписи игрой сохраняется.
 
 ## Команды
 
@@ -98,7 +213,11 @@ eval $S verify    # каждый файл в Data — победитель по 
 eval $S which 'SKSE/Plugins/refrain_nextgen.dll'   # кто поставляет путь и кто побеждает
 ```
 
-## Что делается и почему
+`excludes.txt` рядом со скриптом — пути внутри `Data`, которые не попадут в игру (маска, без учёта
+регистра). Удобно для поиска виновника вылета: исключили плагин, запустили, вернули. MO2 и моды при
+этом не меняются.
+
+## Как это устроено
 
 | MO2 делает виртуально | Скрипт делает физически |
 |---|---|
@@ -110,12 +229,12 @@ eval $S which 'SKSE/Plugins/refrain_nextgen.dll'   # кто поставляет
 | `LocalSaves`: сейвы в `profiles/<p>/saves` | копируются в `My Games/.../__MO_Saves` (путь из `sLocalSavePath`), после игры новые переносятся обратно |
 | новые файлы от игры → `overwrite` | при `restore` всё, что игра создала или подменила в `Data`, переносится в `overwrite` |
 
-Порядок приоритетов в `modlist.txt` проверен замером. Среди общих файлов `6_2_Base` и `6_0_Base`
+Порядок приоритетов в `modlist.txt` проверен замером: среди общих файлов `6_2_Base` и `6_0_Base`
 41 из 150 различаются, и во всех 41 случае новее версия из `6_2_Base`, которая стоит выше в файле.
 
 Инварианты безопасности:
-- `restore` удаляет из `Data` только те ссылки, у которых есть второй экземпляр (`nlink > 1`).
-  Файл без второй ссылки не удаляется, а переносится в `overwrite/_flatten_orphans`.
+- `restore` удаляет из `Data` только ссылки, у которых есть второй экземпляр (`nlink > 1`). Файл без
+  второй ссылки не удаляется, а переносится в `overwrite/_flatten_orphans`.
 - Если MO2 или игра запущены, скрипт откажется работать.
 - Повторный `flatten` без `restore` запрещён.
 - Настройки, изменённые в игре, возвращаются в профиль. Сравнение идёт с тем, что положил скрипт,
@@ -125,10 +244,22 @@ eval $S which 'SKSE/Plugins/refrain_nextgen.dll'   # кто поставляет
 
 ## Ограничения
 
-- `Data`, `mods` и `overwrite` должны быть на одном томе (hardlink). Скрипт проверяет это.
-- Если игра правит существующий файл мода «на месте», правка попадает в сам мод — ровно так же,
-  как под usvfs.
-- Кастомные `mod_directory` / `profiles_directory` в `ModOrganizer.ini` пока не поддерживаются:
-  скрипт откажется работать, молча ничего не сломает.
+- `Data`, `mods` и `overwrite` должны быть на одном томе (hardlink). Скрипт это проверяет.
+- Если игра правит существующий файл мода «на месте», правка попадает в сам мод — так же, как под usvfs.
+- Кастомные `mod_directory` / `profiles_directory` в `ModOrganizer.ini` не поддерживаются: скрипт
+  откажется работать, а не сломает что-то молча.
 - BSA не распаковываются и не нужны: движок грузит их сам, одноимённые архивы решаются тем же
   правилом «побеждает старший».
+- Если `flatten` упадёт посередине, `restore` вернёт `Data`, но подменённые ini в `My Games`
+  придётся вернуть из `RfaD/.mo2flatten/backup/` руками.
+
+## Как повторить замеры
+
+```bash
+python3 bench_load.py            # в отдельном окне; потом запускайте игру любым способом
+python3 bench_load.py --summary  # медиана / мин / макс по режимам
+```
+
+Режим определяется сам (есть состояние flatten — значит скрипт, иначе MO2). Маркеры берутся из логов
+плагинов этой сборки: `QuickLootIE.log` (`kDataLoaded end`, со своим временем) и `refrain_nextgen.log`
+(`log_pre_load_game` → `kPostLoadGame`). В другой сборке их придётся заменить в начале `bench_load.py`.
