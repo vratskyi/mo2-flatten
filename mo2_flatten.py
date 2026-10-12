@@ -390,7 +390,14 @@ def cmd_flatten(ctx: Ctx, args: argparse.Namespace) -> None:
             os.link(src, dst)
             mf.write(f"{rel}\t{name}\t{os.stat(dst).st_ino}\n")
 
-    placed = place_profile_files(ctx)
+    placed: dict = {}
+    try:
+        place_profile_files(ctx, placed)
+    except BaseException:
+        # Data is built and My Games is half-replaced: keep what was swapped so restore can undo it
+        save_state(ctx, {"status": "building", "profile": ctx.profile.name, "placed": placed})
+        print("flatten failed while placing profile files — run `restore`", file=sys.stderr)
+        raise
     save_state(ctx, {
         "status": "flattened",
         "profile": ctx.profile.name,
@@ -419,10 +426,14 @@ def backup_file(ctx: Ctx, path: Path, tag: str) -> str | None:
     return str(dst)
 
 
-def place_profile_files(ctx: Ctx) -> dict:
-    """Put what MO2 virtualises per-profile where the game looks without MO2."""
+def place_profile_files(ctx: Ctx, placed: dict) -> None:
+    """Put what MO2 virtualises per-profile where the game looks without MO2.
+
+    Fills `placed` as it goes (each backup is recorded before the original is removed), so a
+    failure midway still tells restore what to put back.
+    """
     log: list[str] = []
-    placed: dict = {"mygames": {}, "localappdata": {}, "saves": str(saves_dir(ctx)), "log": log}
+    placed.update({"mygames": {}, "localappdata": {}, "saves": str(saves_dir(ctx)), "log": log})
     local_saves, local_settings = profile_settings(ctx)
     ctx.mygames.mkdir(parents=True, exist_ok=True)
     ctx.localappdata.mkdir(parents=True, exist_ok=True)
@@ -459,7 +470,6 @@ def place_profile_files(ctx: Ctx) -> dict:
         dst.mkdir(parents=True, exist_ok=True)
         n = sync_newer(ctx.profile / "saves", dst, move=False)
         log.append(f"profile saves -> {dst} ({n} copied)")
-    return placed
 
 
 def apply_ini_tweaks(tweaks: Path, target: Path, log: list[str]) -> None:
@@ -572,7 +582,8 @@ def restore_profile_files(ctx: Ctx, placed: dict) -> list[str]:
     for name, backup in placed.get("mygames", {}).items():
         live = find_case_insensitive(ctx.mygames, name)
         prof = ctx.profile / name
-        if live and prof.is_file() and file_hash(live) != placed_hash.get(name):
+        # no hash = flatten failed before the game ran: nothing to copy back
+        if live and prof.is_file() and name in placed_hash and file_hash(live) != placed_hash[name]:
             backup_file(ctx, prof, f"profile-{stamp}")
             shutil.copy2(live, prof)                  # keep settings changed in game
             log.append(f"{name}: in-game changes copied back to the profile")
