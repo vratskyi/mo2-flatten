@@ -496,7 +496,10 @@ def sync_newer(src: Path, dst: Path, move: bool) -> int:
             continue
         target = dst / f.relative_to(src)
         if target.exists() and target.stat().st_mtime >= f.stat().st_mtime:
-            same = target.stat().st_size == f.stat().st_size and target.read_bytes() == f.read_bytes()
+            ts, fs = target.stat(), f.stat()
+            # copy2 keeps mtime: equal size+mtime is our own copy, skip reading gigabytes of saves
+            same = ts.st_size == fs.st_size and (
+                ts.st_mtime == fs.st_mtime or target.read_bytes() == f.read_bytes())
             if move and same:
                 f.unlink()                            # identical copy already in place
             continue
@@ -523,6 +526,11 @@ def cmd_restore(ctx: Ctx, args: argparse.Namespace) -> None:
     state = load_state(ctx)
     if not state:
         die("not flattened (no state file)")
+    # each finished step is saved to state, so an interrupted restore resumes where it stopped
+    if state["status"] in ("restoring_profile", "restoring_saves"):
+        print(f"resuming an interrupted restore ({state['status']})")
+        finish_restore(ctx, state)
+        return
     if not ctx.vanilla.is_dir():
         die(f"{ctx.vanilla} is missing — refusing to touch Data")
     manifest = read_manifest(ctx)
@@ -549,11 +557,8 @@ def cmd_restore(ctx: Ctx, args: argparse.Namespace) -> None:
         for dirpath, _, _ in sorted(os.walk(ctx.data), key=lambda t: -t[0].count(os.sep)):
             os.rmdir(dirpath)                         # fails loudly if anything is left
     os.rename(ctx.vanilla, ctx.data)
-
-    log = restore_profile_files(ctx, state.get("placed", {}))
-    if ctx.manifest.exists():
-        ctx.manifest.replace(ctx.state_dir / "manifest.last.tsv")
-    ctx.state_file.unlink()
+    state["status"] = "restoring_profile"
+    save_state(ctx, state)
 
     print(f"restored: {removed} links removed, Data.vanilla -> Data")
     if harvested:
@@ -562,8 +567,25 @@ def cmd_restore(ctx: Ctx, args: argparse.Namespace) -> None:
             print("  " + r)
     if orphans:
         print(f"WARNING: {len(orphans)} files had lost their source; kept in overwrite/_flatten_orphans")
-    for line in log:
-        print("  " + line)
+    finish_restore(ctx, state)
+
+
+def finish_restore(ctx: Ctx, state: dict) -> None:
+    placed = state.get("placed", {})
+    if state["status"] == "restoring_profile":
+        for line in restore_profile_files(ctx, placed):
+            print("  " + line)
+        state["status"] = "restoring_saves"
+        save_state(ctx, state)
+    local_saves, _ = profile_settings(ctx)
+    if local_saves and placed.get("saves"):
+        print("saves: moving back into the profile (do not close this window)...")
+        n = sync_newer(Path(placed["saves"]), ctx.profile / "saves", move=True)
+        print(f"  saves: {n} new/updated moved into the profile")
+    if ctx.manifest.exists():
+        ctx.manifest.replace(ctx.state_dir / "manifest.last.tsv")
+    ctx.state_file.unlink()
+    print("restore complete: normal MO2 mode")
 
 
 def file_hash(path: Path) -> str:
@@ -597,10 +619,6 @@ def restore_profile_files(ctx: Ctx, placed: dict) -> list[str]:
             live.unlink()
         if backup:
             shutil.copy2(backup, ctx.localappdata / Path(backup).name)
-    local_saves, _ = profile_settings(ctx)
-    if local_saves and placed.get("saves"):
-        n = sync_newer(Path(placed["saves"]), ctx.profile / "saves", move=True)
-        log.append(f"saves: {n} new/updated moved into the profile")
     return log
 
 
